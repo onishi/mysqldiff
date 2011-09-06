@@ -1,0 +1,181 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+
+# TODO
+# - drop key
+
+@ARGV == 2 or die 'Usage: mysqldiff dbname1 dbname2';
+
+my @tables = map {
+    my $scheme;
+    if (-e $_) {
+        # file
+        my $create_table = slurp($_);
+        my $tmp_dbname = join '_', 'tmp', time();
+        system(qw/mysqladmin -uroot create/, $tmp_dbname);
+        system('mysql', '-uroot', $tmp_dbname, '-e', $create_table);
+        my @cmd = (qw/mysqldump -uroot --no-data=true/, $tmp_dbname);
+        $scheme = `@cmd`;
+        system(qw/mysql -uroot/, $tmp_dbname, '-e', "drop database $tmp_dbname");
+    } elsif (/ /) {
+        # remote db
+        my @cmd = (qw/mysqldump --no-data=true/, split /\s+/, $_);
+        $scheme = `@cmd`;
+        my $tmp_dbname = join '_', 'tmp', time();
+        system(qw/mysqladmin -uroot create/, $tmp_dbname);
+        system('mysql', '-uroot', $tmp_dbname, '-e', $scheme);
+        @cmd = (qw/mysqldump -uroot --no-data=true/, $tmp_dbname);
+        $scheme = `@cmd`;
+        system(qw/mysql -uroot/, $tmp_dbname, '-e', "drop database $tmp_dbname");
+    } else {
+        # local db
+        my $dbname = $_;
+        my @cmd = (qw/mysqldump -uroot --no-data=true/, $dbname);
+        $scheme = `@cmd`;
+    }
+    parse($scheme);
+} @ARGV;
+
+print diff(@tables);
+
+sub slurp {
+    my $filename = shift;
+    open my $fh, '<', $filename or die;
+    my $res = do { local $/; <$fh> };
+    close $fh;
+    $res;
+}
+
+sub parse {
+    my $tables = [];
+    my $scheme = shift or return $tables;
+    for ($scheme =~ /(CREATE TABLE .*?) ENGINE/smg) {
+        my $content = $_;
+        $content =~ /`(.*?)`/ or next;
+        my $table_name = $1;
+        my ($columns, $keys, $primary_keys);
+        for my $line (split /\n/, $content) {
+            $line =~ /^CREATE/ and next;
+            $line =~ /^\)/ and next;
+            if ($line =~ /^\s*PRIMARY KEY\s+\((.*)\)/) {
+                push @$primary_keys, $1;
+            } elsif ($line =~ /^\s*KEY.*?\((.*)\)/) {
+                push @$keys, $1;
+            } elsif ($line =~ /^\s*`(.*?)`\s+(.+?)[\n,]?$/) {
+                push @$columns, {
+                    column     => $1,
+                    definition => $2,
+                }
+            }
+        }
+        push @$tables, {
+            table_name   => $table_name,
+            primary_keys => $primary_keys || [],
+            keys         => $keys || [],
+            columns      => $columns || [],
+            content      => $content,
+        };
+    }
+    return $tables;
+}
+
+sub diff {
+    my ($old, $new) = @_;
+    my $diff = '';
+    my @old_table_names = sort map { $_->{table_name} } @$old;
+    my @new_table_names = sort map { $_->{table_name} } @$new;
+    my (%old_hash, %new_hash);
+    for (@$old) {
+        $old_hash{$_->{table_name}} = $_;
+    }
+    for (@$new) {
+        $new_hash{$_->{table_name}} = $_;
+    }
+    for my $name (@new_table_names) {
+        if ($old_hash{$name}) {
+            my $old_hash = $old_hash{$name};
+            my $new_hash = $new_hash{$name};
+            $diff .= table_diff($name, $old_hash, $new_hash);
+        } else {
+            $diff .= $new_hash{$name}->{content} . ";\n\n";
+        }
+    }
+
+    return $diff;
+
+}
+
+sub table_diff {
+    my ($name, $old, $new) = @_;
+    my @change = grep {$_} (
+        column_diff($old, $new),
+        key_diff($old, $new),
+    );
+    @change or return '';
+    return sprintf(
+        "ALTER TABLE `%s` %s;\n\n",
+        $name,
+        join(', ', @change),
+    );
+}
+
+sub column_diff {
+    my ($old, $new) = @_;
+    my $old_columns = $old->{columns};
+    my $new_columns = $new->{columns};
+    my (@change, %old_hash, %new_hash, %all_hash);
+    for (@$old_columns) {
+        $old_hash{$_->{column}} = $_;
+        $all_hash{$_->{column}} = $_;
+    }
+    for (@$new_columns) {
+        $new_hash{$_->{column}} = $_;
+        $all_hash{$_->{column}} = $_;
+    }
+    for my $column (sort keys %all_hash) {
+        my $old_definition = $old_hash{$column}->{definition};
+        my $new_definition = $new_hash{$column}->{definition};
+        if (!$old_definition) {
+            push @change, "ADD `$column` $new_definition";
+        } elsif (!$new_definition) {
+            push @change, "DROP `$column`";
+        } elsif ($old_definition ne $new_definition) {
+            push @change, "MODIFY `$column` $new_definition";
+        }
+    }
+    return @change;
+}
+
+sub key_diff {
+    my ($old, $new) = @_;
+    my $old_keys = $old->{keys};
+    my $new_keys = $new->{keys};
+    my (@change, %old_hash, %new_hash);
+    for (@$old_keys) {
+        $old_hash{$_} = 1;
+    }
+    for (@$new_keys) {
+        $new_hash{$_} = 1;
+    }
+    for my $key (@$new_keys) {
+        $old_hash{$key} and next;
+        my $name = join '_', map { s{[`()]}{}g; $_ } split /,/, $key;
+        push @change, "ADD INDEX `$name` ($key)";
+    }
+    return @change;
+}
+
+__END__
+
+=head1 NAME
+
+mysqldiff - diff for mysql
+
+=head1 SYNOPSIS
+
+  mysqldiff dbname1 dbname2
+  mysqldiff '-uroot -hlocalhost dbname1' '-uroot -hlocalhost dbname2'
+  mysqldiff createtable1.sql createtable2.sql
+
+=cut
