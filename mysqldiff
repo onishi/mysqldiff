@@ -50,7 +50,7 @@ sub slurp {
 sub parse {
     my $tables = [];
     my $scheme = shift or return $tables;
-    for ($scheme =~ /(CREATE TABLE .*?) ENGINE/smg) {
+    for ($scheme =~ /(CREATE TABLE .*? ENGINE[^;]*);/smg) {
         my $content = $_;
         $content =~ /`(.*?)`/ or next;
         my $table_name = $1;
