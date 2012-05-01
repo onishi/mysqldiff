@@ -54,12 +54,14 @@ sub parse {
         my $content = $_;
         $content =~ /`(.*?)`/ or next;
         my $table_name = $1;
-        my ($columns, $keys, $primary_keys);
+        my ($columns, $unique_keys,  $keys, $primary_keys);
         for my $line (split /\n/, $content) {
             $line =~ /^CREATE/ and next;
             $line =~ /^\)/ and next;
             if ($line =~ /^\s*PRIMARY KEY\s+\((.*)\)/) {
                 push @$primary_keys, $1;
+            } elsif ($line =~ /^\s*UNIQUE KEY.*?\((.*)\)/) {
+                push @$unique_keys, $1;
             } elsif ($line =~ /^\s*KEY.*?\((.*)\)/) {
                 push @$keys, $1;
             } elsif ($line =~ /^\s*`(.*?)`\s+(.+?)[\n,]?$/) {
@@ -72,6 +74,7 @@ sub parse {
         push @$tables, {
             table_name   => $table_name,
             primary_keys => $primary_keys || [],
+            unique_keys  => $unique_keys || [],
             keys         => $keys || [],
             columns      => $columns || [],
             content      => $content,
@@ -149,20 +152,42 @@ sub column_diff {
 
 sub key_diff {
     my ($old, $new) = @_;
-    my $old_keys = $old->{keys};
-    my $new_keys = $new->{keys};
-    my (@change, %old_hash, %new_hash);
-    for (@$old_keys) {
-        $old_hash{$_} = 1;
-    }
-    for (@$new_keys) {
-        $new_hash{$_} = 1;
-    }
-    for my $key (@$new_keys) {
-        $old_hash{$key} and next;
-        my $name = join '_', map { s{[`()]}{}g; $_ } split /,/, $key;
-        push @change, "ADD INDEX `$name` ($key)";
-    }
+
+    my @change;
+    {# key
+        my $old_keys = $old->{keys};
+        my $new_keys = $new->{keys};
+        my (%old_hash, %new_hash);
+        for (@$old_keys) {
+            $old_hash{$_} = 1;
+        }
+        for (@$new_keys) {
+            $new_hash{$_} = 1;
+        }
+        for my $key (@$new_keys) {
+            $old_hash{$key} and next;
+            my $name = join '_', map { s{[`()]}{}g; $_ } split /,/, $key;
+            push @change, "ADD INDEX `$name` ($key)";
+        }
+    };
+
+    {# unique_key
+        my $old_keys = $old->{unique_keys};
+        my $new_keys = $new->{unique_keys};
+        my (%old_hash, %new_hash);
+        for (@$old_keys) {
+            $old_hash{$_} = 1;
+        }
+        for (@$new_keys) {
+            $new_hash{$_} = 1;
+        }
+        for my $key (@$new_keys) {
+            $old_hash{$key} and next;
+            my $name = join '_', map { s{[`()]}{}g; $_ } split /,/, $key;
+            push @change, "ADD UNIQUE INDEX `$name` ($key)";
+        }
+    };
+
     return @change;
 }
 
