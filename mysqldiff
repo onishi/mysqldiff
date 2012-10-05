@@ -2,9 +2,6 @@
 use strict;
 use warnings;
 
-# TODO
-# - drop key
-
 @ARGV == 2 or die 'Usage: mysqldiff dbname1 dbname2';
 
 my @tables = map {
@@ -60,10 +57,16 @@ sub parse {
             $line =~ /^\)/ and next;
             if ($line =~ /^\s*PRIMARY KEY\s+\((.*)\)/) {
                 push @$primary_keys, $1;
-            } elsif ($line =~ /^\s*UNIQUE KEY.*?\((.*)\)/) {
-                push @$unique_keys, $1;
-            } elsif ($line =~ /^\s*KEY.*?\((.*)\)/) {
-                push @$keys, $1;
+            } elsif ($line =~ /^\s*UNIQUE KEY\s+`(.*)`\s+\((.*)\)/) {
+                push @$unique_keys, {
+                    name   => $1,
+                    column => $2,
+                };
+            } elsif ($line =~ /^\s*KEY\s+`(.*)`\s+\((.*)\)/) {
+                push @$keys, {
+                    name   => $1,
+                    column => $2,
+                };
             } elsif ($line =~ /^\s*`(.*?)`\s+(.+?)[\n,]?$/) {
                 push @$columns, {
                     column     => $1,
@@ -159,15 +162,21 @@ sub key_diff {
         my $new_keys = $new->{keys};
         my (%old_hash, %new_hash);
         for (@$old_keys) {
-            $old_hash{$_} = 1;
+            $old_hash{$_->{column}} = 1;
         }
         for (@$new_keys) {
-            $new_hash{$_} = 1;
+            $new_hash{$_->{column}} = 1;
         }
+        # add key
         for my $key (@$new_keys) {
-            $old_hash{$key} and next;
-            my $name = join '_', map { s{[`()]}{}g; $_ } split /,/, $key;
-            push @change, "ADD INDEX `$name` ($key)";
+            $old_hash{$key->{column}} and next;
+            my $name = join '_', map { s{[`()]}{}g; $_ } split /,/, $key->{column};
+            push @change, "ADD INDEX `$name` ($key->{column})";
+        }
+        # drop key
+        for my $key (@$old_keys) {
+            $new_hash{$key->{column}} and next;
+            push @change, "DROP INDEX `$key->{name}`";
         }
     };
 
@@ -176,15 +185,21 @@ sub key_diff {
         my $new_keys = $new->{unique_keys};
         my (%old_hash, %new_hash);
         for (@$old_keys) {
-            $old_hash{$_} = 1;
+            $old_hash{$_->{column}} = 1;
         }
         for (@$new_keys) {
-            $new_hash{$_} = 1;
+            $new_hash{$_->{column}} = 1;
         }
+        # add unique_key
         for my $key (@$new_keys) {
-            $old_hash{$key} and next;
-            my $name = join '_', map { s{[`()]}{}g; $_ } split /,/, $key;
-            push @change, "ADD UNIQUE INDEX `$name` ($key)";
+            $old_hash{$key->{column}} and next;
+            my $name = join '_', map { s{[`()]}{}g; $_ } split /,/, $key->{column};
+            push @change, "ADD UNIQUE INDEX `$name` ($key->{column})";
+        }
+        # drop unique_key
+        for my $key (@$old_keys) {
+            $new_hash{$key->{column}} and next;
+            push @change, "DROP INDEX `$key->{name}`";
         }
     };
 
